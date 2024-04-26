@@ -1,0 +1,10 @@
+[book]
+authors = ["steep"]
+language = "cn"
+multilingual = false
+src = "src"
+title = "MxRec Notes"
+
+[output.html]
+mathjax-support = true
+
