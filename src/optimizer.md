@@ -30,10 +30,15 @@ $$t := 0 \text{(Initialize timestep)}$$
 参数更新        
 
 $$t := t + 1$$
+
 $$\text{lr}_t := \mathrm{learning\\_rate} * \sqrt{1 - \beta_2^t} / (1 - \beta_1^t)$$
+
 $$m_t := \beta_1 * m_{t-1} + (1 - \beta_1) * g$$
+
 $$v_t := \beta_2 * v_{t-1} + (1 - \beta_2) * g^2$$
+
 $$\text{variable} := \text{variable} - \text{lr}_t * m_t / (\sqrt{v_t} + \epsilon)$$
+
 
 `tensorflow`中实现了`Adam`优化器，具体实现逻辑如下：
 
