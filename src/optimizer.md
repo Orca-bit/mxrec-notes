@@ -38,7 +38,7 @@ $$m_t := \beta_1 * m_{t-1} + (1 - \beta_1) * g$$
 $$v_t := \beta_2 * v_{t-1} + (1 - \beta_2) * g^2$$
 
 $$\text{variable} := \text{variable} - \text{lr}_t * m_t / (\sqrt{v_t} + \epsilon)$$
-
+ 
 
 `tensorflow`中实现了`Adam`优化器，具体实现逻辑如下：
 
@@ -72,7 +72,7 @@ def _apply_sparse_shared(self, grad, var, indices, scatter_add):
     return control_flow_ops.group(*[var_update, m_t, v_t])
 ```
 
-## MxRec中的lazy_adam
+### MxRec中的lazy_adam
 
 [mx_rec/optimizers/lazy_adam.py · Ascend/mxrec - Gitee.com](https://gitee.com/ascend/mxrec/blob/master/mx_rec/optimizers/lazy_adam.py)
 
@@ -93,7 +93,9 @@ def _apply_sparse_shared(self, grad, var, indices, scatter_add):
         momentum = self.get_slot(var, "m")
         old_m_slice = tf.gather(momentum, abs_indices)
         m_t_slice = temp_b1 * old_m_slice + (1 - temp_b1) * grad
-        ## DIFF 这里update的数据与adam不同？？ m_t_slice - old_m_slice
+        ## DIFF 这里算子与tensorflow中不同
+        ## tensorflow中没有gather
+        ## 这里相当于计算两次，gather后先计算新的m，再将其与旧的m的差值更新至slot
         m_update_op = scatter_nd_add(momentum, nd_indices, m_t_slice - old_m_slice)
         velocity = self.get_slot(var, "v")
         old_v_slice = tf.gather(velocity, abs_indices)
@@ -104,3 +106,91 @@ def _apply_sparse_shared(self, grad, var, indices, scatter_add):
         var_update_op = scatter_nd_add(var, nd_indices, tf.divide(-learning_rate * m_t_slice, denominator_slice))
         return control_flow_ops.group(m_update_op, v_update_op, var_update_op)
 ```
+
+### MxRec中的lazy_adam_by_address
+
+[mx_rec/optimizers/lazy_adam_by_addr.py · Ascend/mxrec - 码云 - 开源中国 (gitee.com)](https://gitee.com/ascend/mxrec/blob/master/mx_rec/optimizers/lazy_adam_by_addr.py)
+
+```python
+def _apply_sparse_shared(self, grad, addr):
+    power_b1, power_b2 = self._get_beta_accumulators()
+    power_b1 = math_ops.cast(power_b1, grad.dtype.base_dtype)
+    power_b2 = math_ops.cast(power_b2, grad.dtype.base_dtype)
+    temp = self._cast_to_base_type(grad)
+    temp_lr = temp.get("temp_lr")
+    temp_b1 = temp.get("temp_b1")
+    temp_b2 = temp.get("temp_b2")
+    temp_epsilon = temp.get("temp_epsilon")
+    learning_rate = tf.divide(temp_lr * math_ops.sqrt(1 - power_b2), (1 - power_b1))
+    host_pipeline_ops = import_host_pipeline_ops()
+    dim = grad.shape.as_list()[-1]
+    ## 动态扩容场景，m v没有放在tf的slots
+    ## 梯度更新时调用c++侧的算子
+    combined_tensor = \
+        host_pipeline_ops.embedding_lookup_by_address(addr, embedding_dim=3 * dim, embedding_type=1)
+    ## 查询结果中包含模型参数 m v
+    split_length = [dim] + [dim] + [dim]
+    split_tensors = tf.split(combined_tensor, split_length, axis=1)
+    old_m_slice = split_tensors[1]
+    m_t_slice = temp_b1 * old_m_slice + (1 - temp_b1) * grad
+    old_v_slice = split_tensors[2]
+    v_t_slice = temp_b2 * old_v_slice + (1 - temp_b2) * math_ops.square(grad)
+    denominator_slice = math_ops.sqrt(v_t_slice) + temp_epsilon
+    update_list = [tf.divide(-learning_rate * m_t_slice, denominator_slice)] + [m_t_slice - old_m_slice] + \
+                  [v_t_slice - old_v_slice]
+    update_tensor = tf.concat(update_list, axis=1)
+    ## 调用算子进行模型参数更新
+    var_update_op = host_pipeline_ops.embedding_update_by_address(addr, update_tensor, update_type=0)
+    return var_update_op
+```
+
+## Adagrad优化器
+
+adagrad优化器，`mxrec`中的实现与`tensorflow`中的实现基本相同。
+
+[mx_rec/optimizers/adagrad.py · steepcurve/mxrec - Gitee.com](https://gitee.com/steepcurve/mxrec/blob/develop_l00809940/mx_rec/optimizers/adagrad.py)
+
+```python
+# MxRec
+def _apply_sparse(self, grad, var):
+    acc = self.get_slot(var, "acc")
+    return training_ops.sparse_apply_adagrad(
+        var, acc, math_ops.cast(self._learning_rate_tensor, var.dtype.base_dtype),
+        grad.values,
+        grad.indices,
+        use_locking=self._use_locking)
+```
+
+与`tensorflow`不同的地方是创建`slots`时定义的`op`名称
+```python
+# MxRec
+def _create_slots(self, var_list):
+    for var in var_list:
+        dtype = var.dtype.base_dtype
+        if var.get_shape().is_fully_defined():
+            init = init_ops.constant_initializer(self._initial_accumulator_value,
+                                                 dtype=dtype)
+        else:
+            init = self._init_constant_op(var, dtype)
+
+        acc_state_name = self._name + "/" + "accumulator"
+        self._get_or_make_slot_with_initializer(var, init, var.get_shape(), dtype,
+                                                "acc", acc_state_name)
+
+# tensorflow
+  def _create_slots(self, var_list):
+    for v in var_list:
+      dtype = v.dtype.base_dtype
+      if v.get_shape().is_fully_defined():
+        init = init_ops.constant_initializer(self._initial_accumulator_value,
+                                             dtype=dtype)
+      else:
+        init = self._init_constant_op(v, dtype)
+      self._get_or_make_slot_with_initializer(v, init, v.get_shape(), dtype,
+                                              "accumulator", self._name)
+```
+
+### 算法
+
+Adaptive Subgradient Methods for Online Learning and Stochastic Optimization:[Duchi et al., 2011](http://jmlr.org/papers/v12/duchi11a.html)([pdf](http://www.jmlr.org/papers/volume12/duchi11a/duchi11a.pdf))
+
