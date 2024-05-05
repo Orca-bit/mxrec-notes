@@ -17,6 +17,108 @@ def apply_gradients(self, grads_and_vars, global_step=None, name=None):
     ...
 ```
 
+
+## 动量法
+
+### 泄漏平均值
+
+小批量随机梯度下降平均梯度减小了方差。
+小批量随机梯度下降可以通过以下方式计算：
+
+\\[\mathbf{g}\_{t, t-1} = \partial\_{\mathbf{w}} \frac{1}{|\mathcal{B}\_t|} \sum_{i \in \mathcal{B}\_t} f(\mathbf{x}\_{i}, \mathbf{w}\_{t-1}) = \frac{1}{|\mathcal{B}\_t|} \sum_{i \in \mathcal{B}\_t} \mathbf{h}\_{i, t-1}.\\]
+
+在这里使用\\(\mathbf{h}\_{i, t-1} = \partial\_{\mathbf{w}} f(\mathbf{x}\_i, \mathbf{w}_{t-1})\\)作为样本\\(i\\)的随机梯度下降，使用时间\\(t-1\\)时更新的权重\\(t-1\\)。
+如果能够从方差减少的影响中受益，甚至超过小批量上的梯度平均值，那很不错。
+完成这项任务的一种选择是用**泄漏平均值**（leaky average）取代梯度计算：
+
+\\[\mathbf{v}\_t = \beta \mathbf{v}\_{t-1} + \mathbf{g}\_{t, t-1}\\]
+
+
+其中\\(\beta \in (0, 1)\\)。
+这有效地将瞬时梯度替换为多个“过去”梯度的平均值。
+\\(\mathbf{v}\\)被称为**动量**（momentum），
+它累加了过去的梯度。
+递归地将\\(\mathbf{v}\_t\\)扩展到
+
+\\[\begin{aligned}
+\mathbf{v}\_t = \beta^2 \mathbf{v}\_{t-2} + \beta \mathbf{g}\_{t-1, t-2} + \mathbf{g}\_{t, t-1}
+= \ldots, = \sum_{\tau = 0}^{t-1} \beta^{\tau} \mathbf{g}\_{t-\tau, t-\tau-1}.
+\end{aligned}\\]
+
+其中，较大的\\(\beta\\)相当于长期平均值，而较小的\\(\beta\\)相对于梯度法只是略有修正。
+新的梯度替换不再指向特定实例下降最陡的方向，而是指向过去梯度的加权平均值的方向。
+这使我们能够实现对单批量计算平均值的大部分好处，而不产生实际计算其梯度的代价。
+
+上述推理构成了"加速"梯度方法的基础，例如具有动量的梯度。
+在优化问题条件不佳的情况下（例如，有些方向的进展比其他方向慢得多，类似狭窄的峡谷），"加速"梯度还额外享受更有效的好处。
+此外，它们允许我们对随后的梯度计算平均值，以获得更稳定的下降方向。
+
+### 动量法
+
+**动量法**（momentum）使用\\(\mathbf{v}\_t\\)而不是梯度\\(\mathbf{g}\_t\\)
+
+可以生成以下更新等式：
+
+\\[
+\begin{aligned}
+\mathbf{v}\_t &\leftarrow \beta \mathbf{v}\_{t-1} + \mathbf{g}\_{t, t-1}, \\\\
+\mathbf{x}\_t &\leftarrow \mathbf{x}\_{t-1} - \eta\_t \mathbf{v}\_t.
+\end{aligned}
+\\]
+
+对于\\(\beta = 0\\)，恢复常规的梯度下降。
+
+## Adagrad优化器
+
+adagrad优化器，`mxrec`中的实现与`tensorflow`中的实现基本相同。
+
+[mx_rec/optimizers/adagrad.py · steepcurve/mxrec - Gitee.com](https://gitee.com/steepcurve/mxrec/blob/develop_l00809940/mx_rec/optimizers/adagrad.py)
+
+```python
+# MxRec
+def _apply_sparse(self, grad, var):
+    acc = self.get_slot(var, "acc")
+    return training_ops.sparse_apply_adagrad(
+        var, acc, math_ops.cast(self._learning_rate_tensor, var.dtype.base_dtype),
+        grad.values,
+        grad.indices,
+        use_locking=self._use_locking)
+```
+
+与`tensorflow`不同的地方是创建`slots`时定义的`op`名称
+```python
+# MxRec
+def _create_slots(self, var_list):
+    for var in var_list:
+        dtype = var.dtype.base_dtype
+        if var.get_shape().is_fully_defined():
+            init = init_ops.constant_initializer(self._initial_accumulator_value,
+                                                 dtype=dtype)
+        else:
+            init = self._init_constant_op(var, dtype)
+
+        acc_state_name = self._name + "/" + "accumulator"
+        self._get_or_make_slot_with_initializer(var, init, var.get_shape(), dtype,
+                                                "acc", acc_state_name)
+
+# tensorflow
+  def _create_slots(self, var_list):
+    for v in var_list:
+      dtype = v.dtype.base_dtype
+      if v.get_shape().is_fully_defined():
+        init = init_ops.constant_initializer(self._initial_accumulator_value,
+                                             dtype=dtype)
+      else:
+        init = self._init_constant_op(v, dtype)
+      self._get_or_make_slot_with_initializer(v, init, v.get_shape(), dtype,
+                                              "accumulator", self._name)
+```
+
+### 算法
+
+Adaptive Subgradient Methods for Online Learning and Stochastic Optimization:[Duchi et al., 2011](http://jmlr.org/papers/v12/duchi11a.html)([pdf](http://www.jmlr.org/papers/volume12/duchi11a/duchi11a.pdf))
+
+
 ## ADAM优化器
 
 Adam - A Method for Stochastic Optimization: [Kingma et al., 2015](https://arxiv.org/abs/1412.6980) ([pdf](https://arxiv.org/pdf/1412.6980.pdf))
@@ -144,53 +246,7 @@ def _apply_sparse_shared(self, grad, addr):
     return var_update_op
 ```
 
-## Adagrad优化器
 
-adagrad优化器，`mxrec`中的实现与`tensorflow`中的实现基本相同。
 
-[mx_rec/optimizers/adagrad.py · steepcurve/mxrec - Gitee.com](https://gitee.com/steepcurve/mxrec/blob/develop_l00809940/mx_rec/optimizers/adagrad.py)
 
-```python
-# MxRec
-def _apply_sparse(self, grad, var):
-    acc = self.get_slot(var, "acc")
-    return training_ops.sparse_apply_adagrad(
-        var, acc, math_ops.cast(self._learning_rate_tensor, var.dtype.base_dtype),
-        grad.values,
-        grad.indices,
-        use_locking=self._use_locking)
-```
-
-与`tensorflow`不同的地方是创建`slots`时定义的`op`名称
-```python
-# MxRec
-def _create_slots(self, var_list):
-    for var in var_list:
-        dtype = var.dtype.base_dtype
-        if var.get_shape().is_fully_defined():
-            init = init_ops.constant_initializer(self._initial_accumulator_value,
-                                                 dtype=dtype)
-        else:
-            init = self._init_constant_op(var, dtype)
-
-        acc_state_name = self._name + "/" + "accumulator"
-        self._get_or_make_slot_with_initializer(var, init, var.get_shape(), dtype,
-                                                "acc", acc_state_name)
-
-# tensorflow
-  def _create_slots(self, var_list):
-    for v in var_list:
-      dtype = v.dtype.base_dtype
-      if v.get_shape().is_fully_defined():
-        init = init_ops.constant_initializer(self._initial_accumulator_value,
-                                             dtype=dtype)
-      else:
-        init = self._init_constant_op(v, dtype)
-      self._get_or_make_slot_with_initializer(v, init, v.get_shape(), dtype,
-                                              "accumulator", self._name)
-```
-
-### 算法
-
-Adaptive Subgradient Methods for Online Learning and Stochastic Optimization:[Duchi et al., 2011](http://jmlr.org/papers/v12/duchi11a.html)([pdf](http://www.jmlr.org/papers/volume12/duchi11a/duchi11a.pdf))
 
