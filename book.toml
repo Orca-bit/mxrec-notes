@@ -6,8 +6,8 @@ src = "src"
 title = "MxRec Notes"
 
 [output.html]
-default-theme = "mocha"
-preferred-dark-theme = "mocha"
+default-theme = "ayu"
+preferred-dark-theme = "ayu"
 mathjax-support = true
 git-repository-url = "https://github.com/Orca-bit/mxrec-notes.git"
 additional-css = ['./theme/catppuccin.css', './theme/catppuccin-admonish.css', './theme/pagetoc.css']

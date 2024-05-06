@@ -18,21 +18,27 @@ def apply_gradients(self, grads_and_vars, global_step=None, name=None):
 ```
 
 
+## 梯度下降
+
+- 梯度下降方法，计算所有样本梯度的均值
+- 随机梯度下降，计算随机采样一个样本的梯度
+- 小批量随机梯度下降，采样某个批量大小的样本计算梯度的均值
+
 ## 动量法
 
-### 泄漏平均值
+动量法累积过去的梯度，防止梯度方向剧烈抖动。
 
-小批量随机梯度下降平均梯度减小了方差。
-小批量随机梯度下降可以通过以下方式计算：
+### 衰减平均（leaky average）
+
+小批量随机梯度下降平均梯度减小了方差。通过以下方式计算：
 
 \\[\mathbf{g}\_{t, t-1} = \partial\_{\mathbf{w}} \frac{1}{|\mathcal{B}\_t|} \sum_{i \in \mathcal{B}\_t} f(\mathbf{x}\_{i}, \mathbf{w}\_{t-1}) = \frac{1}{|\mathcal{B}\_t|} \sum_{i \in \mathcal{B}\_t} \mathbf{h}\_{i, t-1}.\\]
 
 在这里使用\\(\mathbf{h}\_{i, t-1} = \partial\_{\mathbf{w}} f(\mathbf{x}\_i, \mathbf{w}_{t-1})\\)作为样本\\(i\\)的随机梯度下降，使用时间\\(t-1\\)时更新的权重\\(t-1\\)。
 如果能够从方差减少的影响中受益，甚至超过小批量上的梯度平均值，那很不错。
-完成这项任务的一种选择是用**泄漏平均值**（leaky average）取代梯度计算：
+完成这项任务的一种选择是用**衰减平均**（leaky average）取代梯度计算：
 
 \\[\mathbf{v}\_t = \beta \mathbf{v}\_{t-1} + \mathbf{g}\_{t, t-1}\\]
-
 
 其中\\(\beta \in (0, 1)\\)。
 这有效地将瞬时梯度替换为多个“过去”梯度的平均值。
@@ -47,11 +53,6 @@ def apply_gradients(self, grads_and_vars, global_step=None, name=None):
 
 其中，较大的\\(\beta\\)相当于长期平均值，而较小的\\(\beta\\)相对于梯度法只是略有修正。
 新的梯度替换不再指向特定实例下降最陡的方向，而是指向过去梯度的加权平均值的方向。
-这使我们能够实现对单批量计算平均值的大部分好处，而不产生实际计算其梯度的代价。
-
-上述推理构成了"加速"梯度方法的基础，例如具有动量的梯度。
-在优化问题条件不佳的情况下（例如，有些方向的进展比其他方向慢得多，类似狭窄的峡谷），"加速"梯度还额外享受更有效的好处。
-此外，它们允许我们对随后的梯度计算平均值，以获得更稳定的下降方向。
 
 ### 动量法
 
@@ -68,7 +69,25 @@ def apply_gradients(self, grads_and_vars, global_step=None, name=None):
 
 对于\\(\beta = 0\\)，恢复常规的梯度下降。
 
-## Adagrad优化器
+## Adagrad
+
+Adaptive Subgradient Methods for Online Learning and Stochastic Optimization:[Duchi et al., 2011](http://jmlr.org/papers/v12/duchi11a.html)([pdf](http://www.jmlr.org/papers/volume12/duchi11a/duchi11a.pdf))
+
+### 算法
+
+解决稀疏场景下不同变量出现频率差异大导致更新不同步的问题。
+
+使用变量\\(\mathbf{s}_t\\)来累加过去的梯度方差，如下所示：
+
+$$\begin{aligned}
+    \mathbf{g}\_t & = \partial\_{\mathbf{w}} l(y\_t, f(\mathbf{x}\_t, \mathbf{w})), \\\\
+    \mathbf{s}\_t & = \mathbf{s}\_{t-1} + \mathbf{g}\_t^2, \\\\
+    \mathbf{w}\_t & = \mathbf{w}\_{t-1} - \frac{\eta}{\sqrt{\mathbf{s}\_t + \epsilon}} \cdot \mathbf{g}\_t.
+\end{aligned}$$
+
+根据\\(\mathbf{s}_t\\)的大小来调整学习率，较大梯度的变量会显著缩小，而其他梯度较小的变量则会得到更平滑的处理。
+
+### 实现
 
 adagrad优化器，`mxrec`中的实现与`tensorflow`中的实现基本相同。
 
@@ -114,14 +133,53 @@ def _create_slots(self, var_list):
                                               "accumulator", self._name)
 ```
 
-### 算法
+## RMSProp
 
-Adaptive Subgradient Methods for Online Learning and Stochastic Optimization:[Duchi et al., 2011](http://jmlr.org/papers/v12/duchi11a.html)([pdf](http://www.jmlr.org/papers/volume12/duchi11a/duchi11a.pdf))
+RMSProp相对于Adagrad所做的改进：
+
+- **学习率衰减问题**：Adagrad通过累积所有梯度的平方到一个状态向量中来调整学习率，这导致随着时间的增长，每个参数的学习率会持续下降，可能过快地变得非常小，从而减慢学习过程，尤其是在优化的后期阶段。RMSProp通过引入一个衰减因子来解决这个问题。
+- **衰减平均（Leaky Average）**：RMSProp使用一个衰减平均来代替Adagrad中的累积平均。这意味着每个参数的历史梯度平方会以一个因子进行衰减，从而允许算法“忘记”早期的梯度信息。具体来说，RMSProp的更新规则如下：
+$$\begin{aligned}
+    \mathbf{s}\_t & \leftarrow \gamma \mathbf{s}\_{t-1} + (1 - \gamma) \mathbf{g}\_t^2, \\\\
+    \mathbf{x}\_t & \leftarrow \mathbf{x}\_{t-1} - \frac{\eta}{\sqrt{\mathbf{s}\_t + \epsilon}} \odot \mathbf{g}\_t.
+\end{aligned}$$
 
 
-## ADAM优化器
+## Adam
 
 Adam - A Method for Stochastic Optimization: [Kingma et al., 2015](https://arxiv.org/abs/1412.6980) ([pdf](https://arxiv.org/pdf/1412.6980.pdf))
+
+### 算法
+
+Adam算法的关键组成部分之一是：它使用leaky average来估算梯度的动量和二次矩，即它使用状态变量
+
+$$\begin{aligned}
+    \mathbf{v}\_t & \leftarrow \beta_1 \mathbf{v}\_{t-1} + (1 - \beta_1) \mathbf{g}\_t, \\\\
+    \mathbf{s}\_t & \leftarrow \beta_2 \mathbf{s}\_{t-1} + (1 - \beta_2) \mathbf{g}\_t^2.
+\end{aligned}$$
+
+这里\\(\beta_1\\)和\\(\beta_2\\)是非负加权参数。
+常将它们设置为\\(\beta_1 = 0.9\\)和\\(\beta_2 = 0.999\\)。
+也就是说，二次矩估计的移动远远慢于动量估计的移动。
+如果初始化\\(\mathbf{v}\_0 = \mathbf{s}\_0 = 0\\)，就存在相当大的初始偏差。
+通过使用\\(\sum_{i=0}^t \beta^i = \frac{1 - \beta^t}{1 - \beta}\\)来解决这个问题。
+相应地，标准化状态变量由下式获得
+
+$$\hat{\mathbf{v}}_t = \frac{\mathbf{v}_t}{1 - \beta_1^t} \text{ and } \hat{\mathbf{s}}_t = \frac{\mathbf{s}_t}{1 - \beta_2^t}.$$
+
+首先，以类似于RMSProp算法的方式重新缩放梯度以获得
+
+$$\mathbf{g}_t' = \frac{\eta \hat{\mathbf{v}}_t}{\sqrt{\hat{\mathbf{s}}_t} + \epsilon}.$$
+
+与RMSProp不同，更新使用动量\\(\hat{\mathbf{v}}_t\\)而不是梯度本身。
+此外，使用\\(\frac{1}{\sqrt{\hat{\mathbf{s}}_t} + \epsilon}\\)而不是\\(\frac{1}{\sqrt{\hat{\mathbf{s}}_t + \epsilon}}\\)进行缩放。
+通常，选择\\(\epsilon = 10^{-6}\\)，这是为了在数值稳定性和逼真度之间取得良好的平衡。
+
+$$\mathbf{x}\_t \leftarrow \mathbf{x}\_{t-1} - \mathbf{g}\_t'.$$
+
+### 实现
+
+实现中变量表示略有不同，同时约简了部分计算。
 
 初始化
 
